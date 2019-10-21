@@ -97,6 +97,7 @@ cpu_loading(){
 	read -s key
 	break
 }
+trap 'exit 5' SIGINT
 while true
 do
 	dialog --clear --menu "SYS INFO" 60 100 5 \
@@ -107,7 +108,7 @@ do
 	CPULOAD "CPU Loading" 2>/tmp/menu.output
 	result=$?
 	if [ $result -eq 1 ] ; then
-		break;
+		exit 0
 	fi
 	tmp=$(cat /tmp/menu.output)
 	if [ $tmp = "CPU" ] ; then
