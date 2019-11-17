@@ -1,0 +1,175 @@
+#!/usr/local/bin/python3
+import sys
+import datetime
+import subprocess
+import pandas as pd
+from getpass import getpass
+import pathlib
+
+
+def get_sorted_snapshot(name):
+	if name == '':
+		cmd = "zfs list -t snapshot | awk 'BEGIN{count=0;} {if(count > 0){print($1)}else{count++}}'"
+	else:
+		cmd = "zfs list -t snapshot | grep " + name + "@ | awk '{print($1)}'"
+	zfs_list = str(subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).communicate()[0], encoding='utf8').split('\n')[:-1]
+	dt_list = [datetime.datetime.strptime(x.split('@')[1], '%Y-%m-%d-%H:%M:%S') for x in zfs_list]
+	if len(zfs_list) == 0 and len(dt_list) == 0:
+		return [], []
+	dt_list, zfs_list = zip(*sorted(zip(dt_list, zfs_list)))
+	return dt_list, zfs_list
+
+
+def check_zfs_snapshot_count(name, count):
+	dt_list, zfs_list = get_sorted_snapshot(name)
+	if len(dt_list) > count:
+		need_delete_count = len(dt_list) - count
+		for i in range(need_delete_count):
+			delete_specific_snapshot(zfs_list[i])
+
+
+def delete_specific_snapshot(snapshot_name, stdout=True):
+	out = subprocess.run(['zfs', 'destroy', snapshot_name], stdout=subprocess.PIPE)
+	if stdout:
+		if out.returncode == 0:
+			print('Destroy ' + snapshot_name)
+		else:
+			print('Snap error: Please check snapname or permission')
+
+
+def create_zfs_snapshot(name, count, stdout=True):
+	snapshot_name = name + '@' + datetime.datetime.now().strftime("%Y-%m-%d-%H:%M:%S")
+	out = subprocess.run(['zfs', 'snapshot', snapshot_name], stdout=subprocess.PIPE)
+	if out.returncode == 0:
+		if stdout:
+			print('Snap ' + snapshot_name)
+		check_zfs_snapshot_count(name, count)
+	else:
+		if stdout:
+			print('Snap error: Please check snapname or permission')
+
+
+def list_zfs_snapshot(name='', id=0, stdout=True):
+	dt_list, zfs_list = get_sorted_snapshot(name)
+	zfs_list = [x.split('@')[0] for x in zfs_list]
+	dt_list = [x.strftime('%Y-%m-%d-%H:%M:%S') for x in dt_list]
+	data = {'ID' : range(1, len(dt_list)+1), 'DATASET' : zfs_list, 'TIME' : dt_list}
+	df = pd.DataFrame(data)
+	if id > 0:
+		df = df[df['ID'] == id]
+		df.reset_index(drop=True, inplace=True)
+	if stdout:
+		if df.empty:
+			print(' ID        DATASET                 TIME	')
+		else:	
+			print(df.to_string(index=False, justify='right'))
+	return df
+
+
+def delete_zfs_snapshot(name='', id=0, stdout=False):
+	df = list_zfs_snapshot(name=name, id=id, stdout=stdout)
+	if df.empty:
+		print('There is no snapshot can delete')
+	for i in range(0, len(df)):
+		delete_specific_snapshot(df.loc[i, 'DATASET'] + '@' + df.loc[i, 'TIME'])
+
+
+def export_zfs_snapshot(name, id=1):
+	df = list_zfs_snapshot(name=name, id=id, stdout=False)
+	if df.empty:
+		print('There is no snapshot can export')
+		return
+	password = getpass('enter aes-256-cbc encryption password:')
+	confirm_password = getpass('Verifying - enter aes-256-cbc encryption password:')
+	if password != confirm_password:
+		print('the password does not match, please try again')
+		return
+	else:
+		export_file_name = '/home/wcchang/snapshot_export/' + df.loc[0, 'DATASET'] + '@' + df.loc[0, 'TIME'] + '.gz.enc'
+		pathlib.Path(export_file_name[:export_file_name.rindex('/')]).mkdir(parents=True, exist_ok=True)
+		cmd = 'zfs send ' + df.loc[0, 'DATASET'] + '@' + df.loc[0, 'TIME'] + ' | gzip | ' + \
+				'openssl enc -aes-256-cbc -pbkdf2 -iter 1000 -pass pass:' + password + \
+				' > ' + export_file_name
+		err = str(subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).communicate()[0], encoding='utf8')
+		if err == '':
+			print('Export ' + df.loc[0, 'DATASET'] + '@' + df.loc[0, 'TIME'] + ' to ' + export_file_name)
+		else:	
+			print(err)
+
+
+def import_zfs_snapshot(file_location, dataset):
+	password = getpass('enter aes-256-cbc decryption password:')
+	cmd = 'openssl enc -d -aes-256-cbc -pbkdf2 -iter 1000 -pass pass:' + password + ' -in ' + file_location + ' | gunzip | zfs receive -F ' + \
+			dataset
+	err = str(subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).communicate()[0], encoding='utf8')
+	if err == '':
+		print('Import ' + file_location + ' to ' + dataset)
+	else:	
+		print(err)
+	dt_list, zfs_list = get_sorted_snapshot(dataset)
+	if len(zfs_list) > 1:
+		print('errrrrrorrrrr')
+	delete_specific_snapshot(zfs_list[0], stdout=False)
+	create_zfs_snapshot(dataset, 20, stdout=False)
+
+
+if __name__ == '__main__':
+	try:
+		if sys.argv[1] == '-l' or sys.argv[1] == '--list':
+			try:
+				if len(sys.argv) == 2:
+					list_zfs_snapshot()
+				elif len(sys.argv) == 3:
+					try:
+						list_zfs_snapshot(id=int(sys.argv[2]))
+					except:
+						list_zfs_snapshot(name=sys.argv[2])
+				elif len(sys.argv) == 4:
+					list_zfs_snapshot(name=sys.argv[2], id=int(sys.argv[3]))
+				else:
+					print('Please check input again')
+			except:
+				print('Please check input again')
+		elif sys.argv[1] == '-d' or sys.argv[1] == '--delete':
+			try:
+				if len(sys.argv) == 2:
+					delete_zfs_snapshot()
+				elif len(sys.argv) == 3:
+					try:
+						delete_zfs_snapshot(id=int(sys.argv[2]))
+					except:
+						delete_zfs_snapshot(name=sys.argv[2])
+				elif len(sys.argv) == 4:
+					delete_zfs_snapshot(name=sys.argv[2], id=int(sys.argv[3]))
+				else:
+					print('Please check input again')
+			except:
+				print('Pleas check input again')
+		elif sys.argv[1] == '-e' or sys.argv[1] == '--export':
+			try:
+				if len(sys.argv) == 3:
+					export_zfs_snapshot(sys.argv[2], 1)
+				elif len(sys.argv) == 4:
+					export_zfs_snapshot(sys.argv[2], int(sys.argv[3]))
+				else:
+					print('Please check input again')
+			except:
+				print('Pleas check input again')
+		elif sys.argv[1] == '-i' or sys.argv[1] == '--import':
+			try:
+				if len(sys.argv) == 4:
+					import_zfs_snapshot(sys.argv[2], sys.argv[3])
+				else:
+					print('Pleas check input again')
+			except:
+				print('Pleas check input again')
+		else:
+			try:
+				if len(sys.argv) == 2:
+					create_zfs_snapshot(sys.argv[1], 20)
+				elif len(sys.argv) == 3:
+					create_zfs_snapshot(sys.argv[1], int(sys.argv[2]))
+			except:
+				print('Please check input again')
+	except IndexError:
+		print('zbackup command format error')
